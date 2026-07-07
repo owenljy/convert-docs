@@ -1,6 +1,6 @@
 [project]
 name = "convert-docs"
-version = "0.1.1"
+version = "0.2.0"
 description = "Recursively convert documents (pdf, docx, pptx, xlsx, ...) to Markdown via markitdown, mirroring the source folder structure into a destination folder."
 readme = "README.md"
 requires-python = ">=3.10"

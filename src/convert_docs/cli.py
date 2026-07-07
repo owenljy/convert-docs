@@ -1,6 +1,8 @@
 """Recursively convert documents to Markdown via markitdown, mirroring folder structure."""
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +12,45 @@ DEFAULT_EXTENSIONS = [
 ]
 
 SEPARATOR = "-" * 40
+
+
+def config_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "convert-docs"
+
+
+def last_run_path() -> Path:
+    return config_dir() / "last_run.json"
+
+
+def save_last_run(src_dir: Path, dest_dir: Path, extensions: list) -> None:
+    path = last_run_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "source": str(src_dir),
+        "destination": str(dest_dir),
+        "extensions": extensions,
+    }, indent=2))
+
+
+def load_last_run() -> dict:
+    path = last_run_path()
+    if not path.exists():
+        print(
+            "Error: no previous run found. Run convert-docs normally first "
+            "(with -s/-o or interactively) before using --last.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error: could not read saved config at {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def parse_extensions(raw: str) -> list:
+    return [e.strip().lower().lstrip(".") for e in raw.split(",") if e.strip()]
 
 
 def strip_quotes(text: str) -> str:
@@ -51,13 +92,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-e", "--ext",
-        default=",".join(DEFAULT_EXTENSIONS),
-        help="Comma-separated extensions to convert (default: %(default)s)",
+        default=None,
+        help=f"Comma-separated extensions to convert (default: {','.join(DEFAULT_EXTENSIONS)})",
     )
     parser.add_argument(
         "-f", "--force",
         action="store_true",
         help="Force re-conversion even if output .md already exists and is up to date",
+    )
+    parser.add_argument(
+        "-l", "--last",
+        action="store_true",
+        help="Reuse the source, destination, and extensions from the last run "
+             "(skips prompts; cannot be combined with -s/-o)",
     )
     return parser.parse_args(argv)
 
@@ -124,15 +171,31 @@ def convert_files(target_files: list, src_dir: Path, dest_dir: Path, force: bool
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    extensions = [e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()]
 
-    src_dir = resolve_source(args)
-    dest_dir = resolve_destination(args, src_dir)
+    if args.last and (args.source or args.output):
+        print("Error: --last cannot be combined with -s/--source or -o/--output.", file=sys.stderr)
+        return 1
+
+    if args.last:
+        last = load_last_run()
+        src_dir = Path(last["source"])
+        if not src_dir.is_dir():
+            print(f"Error: last-used source directory no longer exists: {src_dir}", file=sys.stderr)
+            return 1
+        src_dir = src_dir.resolve()
+        dest_dir = Path(last["destination"])
+        extensions = parse_extensions(args.ext) if args.ext else last.get("extensions", DEFAULT_EXTENSIONS)
+    else:
+        extensions = parse_extensions(args.ext) if args.ext else DEFAULT_EXTENSIONS
+        src_dir = resolve_source(args)
+        dest_dir = resolve_destination(args, src_dir)
 
     if not dest_dir.exists():
         print(f"Destination does not exist, creating: {dest_dir}")
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir = dest_dir.resolve()
+
+    save_last_run(src_dir, dest_dir, extensions)
 
     print(SEPARATOR)
     print(f"Source folder:      {src_dir}")
