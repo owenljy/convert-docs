@@ -10,8 +10,6 @@ structure into a destination folder.
 uv tool install convert-docs
 ```
 
-(Or, before it's published to PyPI: `uv tool install git+https://github.com/owenljy/convert-docs`)
-
 ## Usage
 
 Run with no flags for an interactive prompt (asks for source, then destination):
