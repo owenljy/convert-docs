@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_EXTENSIONS = [
@@ -106,6 +107,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Reuse the source, destination, and extensions from the last run "
              "(skips prompts; cannot be combined with -s/-o)",
     )
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Convert this many files in parallel using separate processes "
+             "(default: %(default)s; use 1 for sequential)",
+    )
     return parser.parse_args(argv)
 
 
@@ -139,32 +147,75 @@ def collect_files(src_dir: Path, dest_dir: Path, ext_set: set) -> tuple:
     return target_files, other_files
 
 
-def convert_files(target_files: list, src_dir: Path, dest_dir: Path, force: bool) -> tuple:
+_worker_md = None
+
+
+def _init_worker() -> None:
+    global _worker_md
     from markitdown import MarkItDown
+    _worker_md = MarkItDown()
 
-    md = MarkItDown()
-    total = len(target_files)
-    converted, failed, skipped = [], [], []
 
-    for i, path in enumerate(target_files, start=1):
+def _convert_one(path_str: str, out_path_str: str) -> tuple:
+    try:
+        result = _worker_md.convert(path_str)
+        Path(out_path_str).write_text(result.text_content, encoding="utf-8")
+        return (True, None)
+    except Exception as exc:
+        return (False, str(exc))
+
+
+def plan_conversions(target_files: list, src_dir: Path, dest_dir: Path, force: bool) -> tuple:
+    to_convert = []
+    skipped = []
+    for path in target_files:
         rel_path = path.relative_to(src_dir)
         out_path = (dest_dir / rel_path).with_suffix(".md")
-        print(f"[{i}/{total}] {rel_path} ... ", end="", flush=True)
-
         if not force and out_path.exists() and out_path.stat().st_mtime >= path.stat().st_mtime:
-            print("skipped (up to date)")
             skipped.append(str(rel_path))
             continue
-
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            result = md.convert(str(path))
-            out_path.write_text(result.text_content, encoding="utf-8")
-            print("OK")
-            converted.append(str(rel_path))
-        except Exception as exc:
-            print("FAILED")
-            failed.append(f"{rel_path} :: {exc}")
+        to_convert.append((path, rel_path, out_path))
+    return to_convert, skipped
+
+
+def convert_files(target_files: list, src_dir: Path, dest_dir: Path, force: bool, jobs: int = 1) -> tuple:
+    to_convert, skipped = plan_conversions(target_files, src_dir, dest_dir, force)
+    total = len(to_convert)
+    converted, failed = [], []
+
+    if total == 0:
+        return converted, failed, skipped
+
+    if jobs <= 1 or total == 1:
+        from markitdown import MarkItDown
+        md = MarkItDown()
+        for i, (path, rel_path, out_path) in enumerate(to_convert, start=1):
+            print(f"[{i}/{total}] {rel_path} ... ", end="", flush=True)
+            try:
+                result = md.convert(str(path))
+                out_path.write_text(result.text_content, encoding="utf-8")
+                print("OK")
+                converted.append(str(rel_path))
+            except Exception as exc:
+                print("FAILED")
+                failed.append(f"{rel_path} :: {exc}")
+        return converted, failed, skipped
+
+    with ProcessPoolExecutor(max_workers=jobs, initializer=_init_worker) as executor:
+        futures = {
+            executor.submit(_convert_one, str(path), str(out_path)): rel_path
+            for path, rel_path, out_path in to_convert
+        }
+        for i, future in enumerate(as_completed(futures), start=1):
+            rel_path = futures[future]
+            ok, err = future.result()
+            if ok:
+                print(f"[{i}/{total}] {rel_path} ... OK")
+                converted.append(str(rel_path))
+            else:
+                print(f"[{i}/{total}] {rel_path} ... FAILED")
+                failed.append(f"{rel_path} :: {err}")
 
     return converted, failed, skipped
 
@@ -207,7 +258,7 @@ def main(argv=None) -> int:
     print(f"Found {len(target_files)} convertible file(s), {len(other_files)} file(s) with unsupported extensions.")
     print(SEPARATOR)
 
-    converted, failed, skipped = convert_files(target_files, src_dir, dest_dir, args.force)
+    converted, failed, skipped = convert_files(target_files, src_dir, dest_dir, args.force, jobs=args.jobs)
 
     print(SEPARATOR)
     print("Summary:")
