@@ -7,8 +7,10 @@ structure into a destination folder.
 ## Install
 
 ```bash
-uv tool install git+https://github.com/owenljy/convert-docs
+uv tool install convert-docs
 ```
+
+(Or, before it's published to PyPI: `uv tool install git+https://github.com/owenljy/convert-docs`)
 
 ## Usage
 
