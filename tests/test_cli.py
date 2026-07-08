@@ -1,4 +1,7 @@
+import json
+import os
 import sys
+import time
 import types
 
 import pytest
@@ -251,3 +254,195 @@ def test_main_log_file_captures_output(tmp_path):
     assert exit_code == 0
     assert log_file.exists()
     assert "Done. Output mirrored under" in log_file.read_text()
+
+
+# --- single-file mode: parsing helpers ------------------------------------------
+
+def test_split_source_input_plain():
+    assert cli.split_source_input("/a/b.pdf") == ("/a/b.pdf", None)
+
+
+def test_split_source_input_with_name():
+    assert cli.split_source_input("/a/b.pdf, custom") == ("/a/b.pdf", "custom")
+
+
+def test_split_source_input_quoted_path_with_comma():
+    path, name = cli.split_source_input('"/a/My, File.pdf", custom')
+    assert path == "/a/My, File.pdf"
+    assert name == "custom"
+
+
+def test_split_source_input_quoted_no_name():
+    assert cli.split_source_input('"/a/b.pdf"') == ("/a/b.pdf", None)
+
+
+def test_sanitize_custom_name_strips_path_and_suffix():
+    assert cli.sanitize_custom_name("sub/dir/My Name.md") == "My Name"
+    assert cli.sanitize_custom_name("plain") == "plain"
+
+
+# --- single-file mode: interactive prompt ---------------------------------------
+
+def test_prompt_source_single_file_with_rename(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("x")
+    inputs = iter([f"{src_file}, custom-name"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    path, is_file, custom_name = cli.prompt_source()
+
+    assert path == src_file.resolve()
+    assert is_file is True
+    assert custom_name == "custom-name"
+
+
+def test_prompt_source_directory_ignores_rename(tmp_path, monkeypatch, capsys):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    inputs = iter([f"{src_dir}, custom-name"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    path, is_file, custom_name = cli.prompt_source()
+
+    assert path == src_dir.resolve()
+    assert is_file is False
+    assert custom_name is None
+    assert "ignoring" in capsys.readouterr().err.lower()
+
+
+def test_prompt_source_retries_on_invalid_path(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("x")
+    inputs = iter(["/no/such/path", str(src_file)])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    path, is_file, custom_name = cli.prompt_source()
+
+    assert path == src_file.resolve()
+    assert is_file is True
+
+
+# --- single-file mode: end to end ------------------------------------------------
+
+def test_main_single_file_default_name(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # accept default destination
+
+    exit_code = cli.main(["-s", str(src_file)])
+
+    assert exit_code == 0
+    assert (tmp_path / "report.md").exists()
+
+
+def test_main_single_file_explicit_output_dir(tmp_path):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    exit_code = cli.main(["-s", str(src_file), "-o", str(out_dir)])
+
+    assert exit_code == 0
+    assert (out_dir / "report.md").exists()
+
+
+def test_main_single_file_explicit_output_file(tmp_path):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    out_file = tmp_path / "custom.md"
+
+    exit_code = cli.main(["-s", str(src_file), "-o", str(out_file)])
+
+    assert exit_code == 0
+    assert out_file.exists()
+
+
+def test_main_single_file_dry_run_writes_nothing(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    exit_code = cli.main(["-s", str(src_file), "--dry-run"])
+
+    assert exit_code == 0
+    assert not (tmp_path / "report.md").exists()
+
+
+def test_main_single_file_skips_when_up_to_date(tmp_path, monkeypatch, capsys):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    out_file = tmp_path / "report.md"
+    out_file.write_text("existing")
+    now = time.time()
+    os.utime(src_file, (now - 100, now - 100))
+    os.utime(out_file, (now, now))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    exit_code = cli.main(["-s", str(src_file)])
+
+    assert exit_code == 0
+    assert out_file.read_text() == "existing"
+    assert "Skipped" in capsys.readouterr().out
+
+
+def test_main_single_file_force_reconverts(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    out_file = tmp_path / "report.md"
+    out_file.write_text("existing")
+    now = time.time()
+    os.utime(src_file, (now - 100, now - 100))
+    os.utime(out_file, (now, now))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    exit_code = cli.main(["-s", str(src_file), "-f"])
+
+    assert exit_code == 0
+    assert out_file.read_text() != "existing"
+
+
+def test_main_interactive_single_file_with_rename(tmp_path, monkeypatch):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    inputs = iter([f"{src_file}, custom-name", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    exit_code = cli.main([])
+
+    assert exit_code == 0
+    assert (tmp_path / "custom-name.md").exists()
+
+
+def test_main_last_replays_file_mode(tmp_path):
+    src_file = tmp_path / "report.txt"
+    src_file.write_text("hello world")
+    out_file = tmp_path / "custom.md"
+
+    cli.main(["-s", str(src_file), "-o", str(out_file)])
+    assert out_file.exists()
+    out_file.unlink()
+
+    exit_code = cli.main(["--last"])
+
+    assert exit_code == 0
+    assert out_file.exists()
+
+
+def test_last_run_backward_compat_defaults_to_dir_mode(tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "a.txt").write_text("hi")
+    out_dir = tmp_path / "out"
+
+    cli.last_run_path().parent.mkdir(parents=True, exist_ok=True)
+    cli.last_run_path().write_text(json.dumps({
+        "source": str(src_dir),
+        "destination": str(out_dir),
+        "extensions": ["txt"],
+    }))
+
+    exit_code = cli.main(["--last"])
+
+    assert exit_code == 0
+    assert (out_dir / "a.md").exists()

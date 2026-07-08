@@ -1,8 +1,9 @@
 # convert-docs
 
-Recursively convert documents (pdf, docx, pptx, xlsx, and more) to Markdown via
-[markitdown](https://github.com/microsoft/markitdown), mirroring the source folder
-structure into a destination folder.
+Convert documents (pdf, docx, pptx, xlsx, and more) to Markdown via
+[markitdown](https://github.com/microsoft/markitdown). Point it at a folder and it
+recursively converts everything, mirroring the structure into a destination folder;
+point it at a single file and it converts just that file.
 
 ## Install
 
@@ -29,8 +30,12 @@ Run with no flags for an interactive prompt (asks for source, then destination):
 convert-docs
 ```
 
-Tip (macOS): select a folder in Finder and press `Option+Command+C` to copy its full
-path, then paste it into the prompt.
+Tip (macOS): select a file or folder in Finder and press `Option+Command+C` to copy
+its full path, then paste it into the prompt.
+
+Pointing it at a single file converts just that file, writing the `.md` next to it by
+default. To use a different output name, append a comma and the new name at the source
+prompt: `~/Downloads/Report.pdf, quarterly-summary` writes `quarterly-summary.md`.
 
 Or pass flags to skip the prompts:
 
@@ -45,8 +50,8 @@ convert-docs -n                  # dry run: show what would happen, write nothin
 
 | Flag | Description |
 |---|---|
-| `-s, --source` | Source directory to scan (skips the interactive prompt) |
-| `-o, --output` | Output directory, mirrors source structure (skips the interactive prompt) |
+| `-s, --source` | Source file or directory to convert (skips the interactive prompt) |
+| `-o, --output` | Output directory (mirrors source structure), or for a single-file source, an output directory or file path (skips the interactive prompt) |
 | `-e, --ext` | Comma-separated extensions to convert |
 | `-f, --force` | Force re-conversion even if output `.md` already exists and is up to date |
 | `-l, --last` | Reuse the source, destination, and extensions from the last run (skips prompts; cannot be combined with `-s`/`-o`) |

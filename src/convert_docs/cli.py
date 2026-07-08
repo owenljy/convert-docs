@@ -1,4 +1,8 @@
-"""Recursively convert documents to Markdown via markitdown, mirroring folder structure."""
+"""Convert documents to Markdown via markitdown.
+
+Given a folder, recursively converts it and mirrors the structure into a
+destination folder. Given a single file, converts just that file.
+"""
 
 import argparse
 import json
@@ -40,13 +44,14 @@ def last_run_path() -> Path:
     return config_dir() / "last_run.json"
 
 
-def save_last_run(src_dir: Path, dest_dir: Path, extensions: list) -> None:
+def save_last_run(src: Path, dest: Path, extensions: list = None, mode: str = "dir") -> None:
     path = last_run_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "source": str(src_dir),
-        "destination": str(dest_dir),
+        "source": str(src),
+        "destination": str(dest),
         "extensions": extensions,
+        "mode": mode,
     }, indent=2))
 
 
@@ -76,13 +81,47 @@ def strip_quotes(text: str) -> str:
     return text
 
 
-def prompt_source() -> Path:
+def split_source_input(raw: str) -> tuple:
+    """Split "path" or "path, new-name" into (path, custom_name).
+
+    Handles a quoted path that itself contains a comma by matching the
+    closing quote before looking for the rename separator.
+    """
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        if end != -1:
+            path_part = raw[1:end]
+            rest = raw[end + 1:].strip()
+            name_part = rest[1:].strip() if rest.startswith(",") else ""
+            return path_part, (name_part or None)
+    path_part, _, name_part = raw.partition(",")
+    return strip_quotes(path_part.strip()), (name_part.strip() or None)
+
+
+def sanitize_custom_name(raw_name: str) -> str:
+    """Reduce a user-supplied rename to a bare filename stem (no path, no .md)."""
+    name = Path(raw_name).name
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name
+
+
+def prompt_source() -> tuple:
+    """Returns (path, is_file, custom_name)."""
     while True:
-        raw = strip_quotes(input("Source folder path: ").strip())
-        candidate = Path(raw or ".").expanduser()
+        raw = input("Source file or folder path: ")
+        path_part, custom_name = split_source_input(raw)
+        candidate = Path(path_part or ".").expanduser()
         if candidate.is_dir():
-            return candidate.resolve()
-        print(f"  '{raw}' is not a valid directory. Try again.", file=sys.stderr)
+            if custom_name:
+                print("  Note: renaming only applies to a single file; ignoring it.", file=sys.stderr)
+            return candidate.resolve(), False, None
+        if candidate.is_file():
+            name = sanitize_custom_name(custom_name) if custom_name else None
+            return candidate.resolve(), True, name
+        print(f"  '{path_part}' is not a valid file or directory. Try again.", file=sys.stderr)
 
 
 def prompt_destination(default: Path) -> Path:
@@ -92,6 +131,18 @@ def prompt_destination(default: Path) -> Path:
     if not raw:
         return default
     return Path(raw).expanduser().resolve()
+
+
+def prompt_destination_file(default: Path) -> Path:
+    print("Destination file path (press Enter to use the default):")
+    print(f"  default: {default}")
+    raw = strip_quotes(input("> ").strip())
+    if not raw:
+        return default
+    candidate = Path(raw).expanduser().resolve()
+    if candidate.is_dir():
+        return candidate / default.name
+    return candidate.with_suffix(".md")
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -106,11 +157,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-s", "--source",
-        help="Source directory to scan (skips the interactive prompt)",
+        help="Source file or directory to convert (skips the interactive prompt)",
     )
     parser.add_argument(
         "-o", "--output",
-        help="Output directory, mirrors source structure (skips the interactive prompt)",
+        help="Output directory (mirrors source structure) or, when -s is a single "
+             "file, an output directory or file path (skips the interactive prompt)",
     )
     parser.add_argument(
         "-e", "--ext",
@@ -147,18 +199,32 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_source(args: argparse.Namespace) -> Path:
+def resolve_source(args: argparse.Namespace) -> tuple:
+    """Returns (path, is_file, custom_name). custom_name is always None here;
+    the rename shortcut is only available at the interactive prompt."""
     if not args.source:
         return prompt_source()
-    src_dir = Path(args.source).expanduser()
-    if not src_dir.is_dir():
-        print(f"Error: source directory '{args.source}' does not exist.", file=sys.stderr)
-        sys.exit(1)
-    return src_dir.resolve()
+    src = Path(args.source).expanduser()
+    if src.is_dir():
+        return src.resolve(), False, None
+    if src.is_file():
+        return src.resolve(), True, None
+    print(f"Error: source path '{args.source}' does not exist.", file=sys.stderr)
+    sys.exit(1)
 
 
-def resolve_destination(args: argparse.Namespace, src_dir: Path) -> Path:
-    default = src_dir / "Context"
+def resolve_destination(args: argparse.Namespace, src: Path, is_file: bool, custom_name: str) -> Path:
+    if is_file:
+        default_name = (custom_name or src.stem) + ".md"
+        default = src.with_name(default_name)
+        if not args.output:
+            return prompt_destination_file(default)
+        out = Path(args.output).expanduser().resolve()
+        if out.is_dir():
+            return out / default_name
+        return out.with_suffix(".md")
+
+    default = src / "Context"
     if not args.output:
         return prompt_destination(default)
     return Path(args.output).expanduser().resolve()
@@ -310,18 +376,71 @@ def main(argv=None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.last:
         last = load_last_run()
-        src_dir = Path(last["source"])
-        if not src_dir.is_dir():
-            print(f"Error: last-used source directory no longer exists: {src_dir}", file=sys.stderr)
-            return 1
-        src_dir = src_dir.resolve()
-        dest_dir = Path(last["destination"])
-        extensions = parse_extensions(args.ext) if args.ext else last.get("extensions", DEFAULT_EXTENSIONS)
-    else:
-        extensions = parse_extensions(args.ext) if args.ext else DEFAULT_EXTENSIONS
-        src_dir = resolve_source(args)
-        dest_dir = resolve_destination(args, src_dir)
+        mode = last.get("mode", "dir")
+        src = Path(last["source"])
+        dest = Path(last["destination"])
 
+        if mode == "file":
+            if not src.is_file():
+                print(f"Error: last-used source file no longer exists: {src}", file=sys.stderr)
+                return 1
+            return _run_single_file(args, src.resolve(), dest)
+
+        if not src.is_dir():
+            print(f"Error: last-used source directory no longer exists: {src}", file=sys.stderr)
+            return 1
+        extensions = parse_extensions(args.ext) if args.ext else last.get("extensions", DEFAULT_EXTENSIONS)
+        return _run_directory(args, src.resolve(), dest, extensions)
+
+    src, is_file, custom_name = resolve_source(args)
+    dest = resolve_destination(args, src, is_file, custom_name)
+
+    if is_file:
+        return _run_single_file(args, src, dest)
+
+    extensions = parse_extensions(args.ext) if args.ext else DEFAULT_EXTENSIONS
+    return _run_directory(args, src, dest, extensions)
+
+
+def _run_single_file(args: argparse.Namespace, src_path: Path, dest_path: Path) -> int:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    save_last_run(src_path, dest_path, mode="file")
+
+    print(SEPARATOR)
+    print(f"Source file:      {src_path}")
+    print(f"Destination file: {dest_path}")
+    print(SEPARATOR)
+
+    up_to_date = (
+        not args.force
+        and dest_path.exists()
+        and dest_path.stat().st_mtime >= src_path.stat().st_mtime
+    )
+    if up_to_date:
+        print(f"Skipped (up to date): {dest_path.name}")
+        return 0
+
+    if args.dry_run:
+        print(f"Would convert: {src_path.name} -> {dest_path.name}")
+        return 0
+
+    print(f"{src_path.name} ... ", end="", flush=True)
+    try:
+        from markitdown import MarkItDown
+        result = MarkItDown().convert(str(src_path))
+        dest_path.write_text(result.text_content, encoding="utf-8")
+    except Exception as exc:
+        print("FAILED")
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print("OK")
+    print(SEPARATOR)
+    print(f"Done. Output written to: {dest_path}")
+    return 0
+
+
+def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, extensions: list) -> int:
     if not dest_dir.exists():
         print(f"Destination does not exist, creating: {dest_dir}")
     dest_dir.mkdir(parents=True, exist_ok=True)
