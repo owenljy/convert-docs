@@ -6,23 +6,20 @@ structure into a destination folder.
 
 ## Install
 
-Requires [uv](https://docs.astral.sh/uv/). If you don't have it yet:
-
-```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-Then install the tool:
+Requires Python 3.10+.
 
 ```bash
 uv tool install convert-docs
 ```
 
-No `uv`? Plain `pip` also works, as long as it's Python 3.10+: `pip install convert-docs`.
+Don't have [uv](https://docs.astral.sh/uv/)? Install it first:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
+```
+
+Or skip uv entirely and use pip: `pip install convert-docs`
 
 ## Usage
 
@@ -53,20 +50,6 @@ convert-docs -j 8                # convert 8 files in parallel instead of the de
 
 Files with unsupported extensions are listed at the end instead of being silently
 skipped, and any conversion failures are reported with the underlying error.
-
-### Parallel conversion
-
-Files convert using separate OS processes (real parallelism across CPU cores, not
-`asyncio` — conversion is CPU-bound parsing work, not I/O waiting, so asyncio's
-cooperative concurrency wouldn't actually help). Benchmarked on a 10-core Mac converting
-12–30 real docx files: `-j 4` (the default) cut wall time by ~2.3x vs. sequential.
-Pushing higher didn't help further — `-j 8` was consistently *slower* than `-j 4` in
-testing, since each worker process pays a fixed startup cost importing `markitdown`'s
-dependencies (onnxruntime, magika, pandas), which outweighs the extra parallelism for
-typical batch sizes. If you're converting a very large batch (hundreds of files), it's
-worth experimenting with higher `-j` values yourself; for typical folders the default
-is a reasonable balance. Progress lines print in completion order, not scan order, since
-files finish out of sequence when running in parallel.
 
 ### Re-running on new files
 
