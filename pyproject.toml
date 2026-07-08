@@ -11,6 +11,9 @@ dependencies = [
 [project.scripts]
 convert-docs = "convert_docs.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

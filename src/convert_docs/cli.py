@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from importlib import metadata
 from pathlib import Path
 
 DEFAULT_EXTENSIONS = [
@@ -12,7 +13,22 @@ DEFAULT_EXTENSIONS = [
     "html", "htm", "txt", "epub", "json", "xml", "msg",
 ]
 
+EXCLUDED_DIR_NAMES = {
+    ".git", ".hg", ".svn", "node_modules", "__pycache__",
+    ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache",
+    ".idea", ".vscode", ".cache",
+}
+
+EXCLUDED_FILE_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
 SEPARATOR = "-" * 40
+
+
+def get_version() -> str:
+    try:
+        return metadata.version("convert-docs")
+    except metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def config_dir() -> Path:
@@ -84,6 +100,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         description=__doc__,
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {get_version()}",
+    )
+    parser.add_argument(
         "-s", "--source",
         help="Source directory to scan (skips the interactive prompt)",
     )
@@ -114,6 +135,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Convert this many files in parallel using separate processes "
              "(default: %(default)s; use 1 for sequential)",
     )
+    parser.add_argument(
+        "-n", "--dry-run",
+        action="store_true",
+        help="Show what would be converted, skipped, or collide without writing any files",
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Append this run's output to a file in addition to stdout",
+    )
     return parser.parse_args(argv)
 
 
@@ -137,13 +167,18 @@ def resolve_destination(args: argparse.Namespace, src_dir: Path) -> Path:
 def collect_files(src_dir: Path, dest_dir: Path, ext_set: set) -> tuple:
     target_files = []
     other_files = []
-    for path in sorted(src_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if dest_dir == path or dest_dir in path.parents:
-            continue
-        suffix = path.suffix.lower().lstrip(".")
-        (target_files if suffix in ext_set else other_files).append(path)
+    for dirpath, dirnames, filenames in os.walk(src_dir):
+        dirpath = Path(dirpath)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in EXCLUDED_DIR_NAMES and (dirpath / d) != dest_dir
+        )
+        for filename in sorted(filenames):
+            if filename in EXCLUDED_FILE_NAMES:
+                continue
+            path = dirpath / filename
+            suffix = path.suffix.lower().lstrip(".")
+            (target_files if suffix in ext_set else other_files).append(path)
     return target_files, other_files
 
 
@@ -166,26 +201,39 @@ def _convert_one(path_str: str, out_path_str: str) -> tuple:
 
 
 def plan_conversions(target_files: list, src_dir: Path, dest_dir: Path, force: bool) -> tuple:
+    """Decide what to convert, skip, or reject as an output-path collision.
+
+    Pure planning: does not touch the filesystem beyond stat()/exists() checks,
+    so it's safe to call for a --dry-run preview.
+    """
     to_convert = []
     skipped = []
+    collisions = []
+    seen = {}
     for path in target_files:
         rel_path = path.relative_to(src_dir)
         out_path = (dest_dir / rel_path).with_suffix(".md")
+        if out_path in seen:
+            collisions.append((rel_path, seen[out_path]))
+            continue
+        seen[out_path] = rel_path
         if not force and out_path.exists() and out_path.stat().st_mtime >= path.stat().st_mtime:
             skipped.append(str(rel_path))
             continue
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         to_convert.append((path, rel_path, out_path))
-    return to_convert, skipped
+    return to_convert, skipped, collisions
 
 
-def convert_files(target_files: list, src_dir: Path, dest_dir: Path, force: bool, jobs: int = 1) -> tuple:
-    to_convert, skipped = plan_conversions(target_files, src_dir, dest_dir, force)
+def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
+    """Run pre-planned conversions. Returns (converted, failed)."""
     total = len(to_convert)
     converted, failed = [], []
 
     if total == 0:
-        return converted, failed, skipped
+        return converted, failed
+
+    for _, _, out_path in to_convert:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if jobs <= 1 or total == 1:
         from markitdown import MarkItDown
@@ -200,24 +248,42 @@ def convert_files(target_files: list, src_dir: Path, dest_dir: Path, force: bool
             except Exception as exc:
                 print("FAILED")
                 failed.append(f"{rel_path} :: {exc}")
-        return converted, failed, skipped
+        return converted, failed
 
     with ProcessPoolExecutor(max_workers=jobs, initializer=_init_worker) as executor:
         futures = {
             executor.submit(_convert_one, str(path), str(out_path)): rel_path
             for path, rel_path, out_path in to_convert
         }
-        for i, future in enumerate(as_completed(futures), start=1):
-            rel_path = futures[future]
-            ok, err = future.result()
-            if ok:
-                print(f"[{i}/{total}] {rel_path} ... OK")
-                converted.append(str(rel_path))
-            else:
-                print(f"[{i}/{total}] {rel_path} ... FAILED")
-                failed.append(f"{rel_path} :: {err}")
+        try:
+            for i, future in enumerate(as_completed(futures), start=1):
+                rel_path = futures[future]
+                ok, err = future.result()
+                if ok:
+                    print(f"[{i}/{total}] {rel_path} ... OK")
+                    converted.append(str(rel_path))
+                else:
+                    print(f"[{i}/{total}] {rel_path} ... FAILED")
+                    failed.append(f"{rel_path} :: {err}")
+        except KeyboardInterrupt:
+            print("\nInterrupted, cancelling remaining conversions...", file=sys.stderr)
+            executor.shutdown(cancel_futures=True)
+            raise
 
-    return converted, failed, skipped
+    return converted, failed
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 def main(argv=None) -> int:
@@ -227,6 +293,21 @@ def main(argv=None) -> int:
         print("Error: --last cannot be combined with -s/--source or -o/--output.", file=sys.stderr)
         return 1
 
+    if not args.log_file:
+        return _run(args)
+
+    log_path = Path(args.log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    original_stdout = sys.stdout
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        sys.stdout = _Tee(original_stdout, log_fh)
+        try:
+            return _run(args)
+        finally:
+            sys.stdout = original_stdout
+
+
+def _run(args: argparse.Namespace) -> int:
     if args.last:
         last = load_last_run()
         src_dir = Path(last["source"])
@@ -255,16 +336,32 @@ def main(argv=None) -> int:
     print(SEPARATOR)
 
     target_files, other_files = collect_files(src_dir, dest_dir, set(extensions))
+    to_convert, skipped, collisions = plan_conversions(target_files, src_dir, dest_dir, args.force)
     print(f"Found {len(target_files)} convertible file(s), {len(other_files)} file(s) with unsupported extensions.")
     print(SEPARATOR)
 
-    converted, failed, skipped = convert_files(target_files, src_dir, dest_dir, args.force, jobs=args.jobs)
+    if args.dry_run:
+        print("Dry run - no files were written.")
+        print(f"  Would convert:          {len(to_convert)}")
+        print(f"  Already up to date:     {len(skipped)}")
+        print(f"  Name collisions:        {len(collisions)}")
+        print(f"  Unsupported extension:  {len(other_files)}")
+        _print_collisions(collisions, dest_dir, src_dir)
+        _print_unsupported(other_files, src_dir)
+        return 1 if collisions else 0
+
+    try:
+        converted, failed = execute_conversions(to_convert, jobs=args.jobs)
+    except KeyboardInterrupt:
+        print("\nAborted by user.", file=sys.stderr)
+        return 130
 
     print(SEPARATOR)
     print("Summary:")
     print(f"  Converted:              {len(converted)}")
     print(f"  Skipped (up to date):   {len(skipped)}")
     print(f"  Failed:                 {len(failed)}")
+    print(f"  Name collisions:        {len(collisions)}")
     print(f"  Unsupported extension:  {len(other_files)}")
 
     if failed:
@@ -273,16 +370,36 @@ def main(argv=None) -> int:
         for item in failed:
             print(f"  - {item}")
 
-    if other_files:
-        print()
-        print("Unsupported / not attempted:")
-        for path in other_files:
-            print(f"  - {path.relative_to(src_dir)}")
+    _print_collisions(collisions, dest_dir, src_dir)
+    _print_unsupported(other_files, src_dir)
 
     print(SEPARATOR)
     print(f"Done. Output mirrored under: {dest_dir}")
-    return 1 if failed else 0
+    return 1 if (failed or collisions) else 0
+
+
+def _print_collisions(collisions: list, dest_dir: Path, src_dir: Path) -> None:
+    if not collisions:
+        return
+    print()
+    print("Name collisions (same output path, not converted):")
+    for rel_path, existing_rel_path in collisions:
+        out_name = (dest_dir / rel_path).with_suffix(".md").relative_to(dest_dir)
+        print(f"  - {rel_path} skipped: would overwrite {out_name} (already used by {existing_rel_path})")
+
+
+def _print_unsupported(other_files: list, src_dir: Path) -> None:
+    if not other_files:
+        return
+    print()
+    print("Unsupported / not attempted:")
+    for path in other_files:
+        print(f"  - {path.relative_to(src_dir)}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(130)
