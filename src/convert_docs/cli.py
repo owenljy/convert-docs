@@ -7,6 +7,7 @@ destination folder. Given a single file, converts just that file.
 import argparse
 import json
 import os
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from importlib import metadata
@@ -26,6 +27,48 @@ EXCLUDED_DIR_NAMES = {
 EXCLUDED_FILE_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 SEPARATOR = "-" * 40
+
+_ANSI_RESET = "\033[0m"
+_ANSI_BOLD = "\033[1m"
+_ANSI_DIM = "\033[2m"
+_ANSI_CYAN = "\033[36m"
+_ANSI_GREEN = "\033[32m"
+_ANSI_RED = "\033[31m"
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+_color_enabled = False
+
+
+def _detect_color_support() -> bool:
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if os.environ.get("FORCE_COLOR") is not None:
+        return True
+    stream = sys.__stdout__
+    return bool(stream) and hasattr(stream, "isatty") and stream.isatty()
+
+
+def _style(text, *codes: str) -> str:
+    text = str(text)
+    if not _color_enabled or not text:
+        return text
+    return "".join(codes) + text + _ANSI_RESET
+
+
+def style_path(text) -> str:
+    return _style(text, _ANSI_CYAN)
+
+
+def style_ok(text) -> str:
+    return _style(text, _ANSI_BOLD, _ANSI_GREEN)
+
+
+def style_fail(text) -> str:
+    return _style(text, _ANSI_BOLD, _ANSI_RED)
+
+
+def style_hint(text) -> str:
+    return _style(text, _ANSI_DIM)
 
 
 def get_version() -> str:
@@ -125,18 +168,18 @@ def prompt_source() -> tuple:
 
 
 def prompt_destination(default: Path) -> Path:
-    print("Destination folder path (press Enter to use the default):")
-    print(f"  default: {default}")
-    raw = strip_quotes(input("> ").strip())
+    print("Destination folder path:")
+    print(f"  default: {style_path(default)}")
+    raw = strip_quotes(input(style_hint("[Enter = default] > ")).strip())
     if not raw:
         return default
     return Path(raw).expanduser().resolve()
 
 
 def prompt_destination_file(default: Path) -> Path:
-    print("Destination file path (press Enter to use the default):")
-    print(f"  default: {default}")
-    raw = strip_quotes(input("> ").strip())
+    print("Destination file path:")
+    print(f"  default: {style_path(default)}")
+    raw = strip_quotes(input(style_hint("[Enter = default] > ")).strip())
     if not raw:
         return default
     candidate = Path(raw).expanduser().resolve()
@@ -305,14 +348,14 @@ def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
         from markitdown import MarkItDown
         md = MarkItDown()
         for i, (path, rel_path, out_path) in enumerate(to_convert, start=1):
-            print(f"[{i}/{total}] {rel_path} ... ", end="", flush=True)
+            print(f"[{i}/{total}] {style_path(rel_path)} ... ", end="", flush=True)
             try:
                 result = md.convert(str(path))
                 out_path.write_text(result.text_content, encoding="utf-8")
-                print("OK")
+                print(style_ok("OK"))
                 converted.append(str(rel_path))
             except Exception as exc:
-                print("FAILED")
+                print(style_fail("FAILED"))
                 failed.append(f"{rel_path} :: {exc}")
         return converted, failed
 
@@ -324,12 +367,12 @@ def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
         try:
             for i, future in enumerate(as_completed(futures), start=1):
                 rel_path = futures[future]
-                ok, err = future.result()
-                if ok:
-                    print(f"[{i}/{total}] {rel_path} ... OK")
+                succeeded, err = future.result()
+                if succeeded:
+                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_ok('OK')}")
                     converted.append(str(rel_path))
                 else:
-                    print(f"[{i}/{total}] {rel_path} ... FAILED")
+                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_fail('FAILED')}")
                     failed.append(f"{rel_path} :: {err}")
         except KeyboardInterrupt:
             print("\nInterrupted, cancelling remaining conversions...", file=sys.stderr)
@@ -340,12 +383,16 @@ def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
 
 
 class _Tee:
+    """Writes to multiple streams, stripping ANSI color codes for non-tty ones
+    (e.g. a --log-file) so the terminal stays colored but the file stays plain."""
+
     def __init__(self, *streams):
         self.streams = streams
 
     def write(self, data):
         for stream in self.streams:
-            stream.write(data)
+            is_tty = getattr(stream, "isatty", lambda: False)()
+            stream.write(data if is_tty else _ANSI_RE.sub("", data))
 
     def flush(self):
         for stream in self.streams:
@@ -353,6 +400,9 @@ class _Tee:
 
 
 def main(argv=None) -> int:
+    global _color_enabled
+    _color_enabled = _detect_color_support()
+
     args = parse_args(argv)
 
     if args.last and (args.source or args.output):
@@ -407,8 +457,8 @@ def _run_single_file(args: argparse.Namespace, src_path: Path, dest_path: Path) 
     save_last_run(src_path, dest_path, mode="file")
 
     print(SEPARATOR)
-    print(f"Source file:      {src_path}")
-    print(f"Destination file: {dest_path}")
+    print(f"Source file:      {style_path(src_path)}")
+    print(f"Destination file: {style_path(dest_path)}")
     print(SEPARATOR)
 
     up_to_date = (
@@ -417,40 +467,40 @@ def _run_single_file(args: argparse.Namespace, src_path: Path, dest_path: Path) 
         and dest_path.stat().st_mtime >= src_path.stat().st_mtime
     )
     if up_to_date:
-        print(f"Skipped (up to date): {dest_path.name}")
+        print(f"Skipped (up to date): {style_path(dest_path.name)}")
         return 0
 
     if args.dry_run:
-        print(f"Would convert: {src_path.name} -> {dest_path.name}")
+        print(f"Would convert: {style_path(src_path.name)} -> {style_path(dest_path.name)}")
         return 0
 
-    print(f"{src_path.name} ... ", end="", flush=True)
+    print(f"{style_path(src_path.name)} ... ", end="", flush=True)
     try:
         from markitdown import MarkItDown
         result = MarkItDown().convert(str(src_path))
         dest_path.write_text(result.text_content, encoding="utf-8")
     except Exception as exc:
-        print("FAILED")
+        print(style_fail("FAILED"))
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print("OK")
+    print(style_ok("OK"))
     print(SEPARATOR)
-    print(f"Done. Output written to: {dest_path}")
+    print(f"Done. Output written to: {style_path(dest_path)}")
     return 0
 
 
 def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, extensions: list) -> int:
     if not dest_dir.exists():
-        print(f"Destination does not exist, creating: {dest_dir}")
+        print(f"Destination does not exist, creating: {style_path(dest_dir)}")
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir = dest_dir.resolve()
 
     save_last_run(src_dir, dest_dir, extensions)
 
     print(SEPARATOR)
-    print(f"Source folder:      {src_dir}")
-    print(f"Destination folder: {dest_dir}")
+    print(f"Source folder:      {style_path(src_dir)}")
+    print(f"Destination folder: {style_path(dest_dir)}")
     print(f"Extensions:         {', '.join(extensions)}")
     print(SEPARATOR)
 
@@ -487,13 +537,14 @@ def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, exte
         print()
         print("Failed conversions:")
         for item in failed:
-            print(f"  - {item}")
+            rel_path, _, err = item.partition(" :: ")
+            print(f"  - {style_path(rel_path)} :: {err}")
 
     _print_collisions(collisions, dest_dir, src_dir)
     _print_unsupported(other_files, src_dir)
 
     print(SEPARATOR)
-    print(f"Done. Output mirrored under: {dest_dir}")
+    print(f"Done. Output mirrored under: {style_path(dest_dir)}")
     return 1 if (failed or collisions) else 0
 
 
@@ -504,7 +555,10 @@ def _print_collisions(collisions: list, dest_dir: Path, src_dir: Path) -> None:
     print("Name collisions (same output path, not converted):")
     for rel_path, existing_rel_path in collisions:
         out_name = (dest_dir / rel_path).with_suffix(".md").relative_to(dest_dir)
-        print(f"  - {rel_path} skipped: would overwrite {out_name} (already used by {existing_rel_path})")
+        print(
+            f"  - {style_path(rel_path)} skipped: would overwrite {style_path(out_name)} "
+            f"(already used by {style_path(existing_rel_path)})"
+        )
 
 
 def _print_unsupported(other_files: list, src_dir: Path) -> None:
@@ -512,8 +566,8 @@ def _print_unsupported(other_files: list, src_dir: Path) -> None:
         return
     print()
     print("Unsupported / not attempted:")
-    for path in other_files:
-        print(f"  - {path.relative_to(src_dir)}")
+    for file_path in other_files:
+        print(f"  - {style_path(file_path.relative_to(src_dir))}")
 
 
 if __name__ == "__main__":

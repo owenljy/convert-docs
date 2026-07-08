@@ -13,6 +13,9 @@ from convert_docs import cli
 def isolate_config_dir(tmp_path, monkeypatch):
     """Never touch the real ~/.config/convert-docs while testing."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    # Keep output plain and deterministic regardless of how the terminal
+    # running pytest happens to be configured.
+    monkeypatch.setenv("NO_COLOR", "1")
 
 
 def install_fake_markitdown(monkeypatch, results):

@@ -67,6 +67,8 @@ skipped automatically. If two source files would produce the same output path (e
 `report.docx` and `report.pdf` both map to `report.md`), the first is converted and
 the rest are reported as collisions rather than silently overwritten.
 
+Paths are highlighted in supported terminals; set `NO_COLOR=1` to disable.
+
 ### Re-running on new files
 
 Every run saves its source/destination/extensions to `~/.config/convert-docs/last_run.json`.
