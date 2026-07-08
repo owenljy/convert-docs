@@ -29,6 +29,9 @@ Run with no flags for an interactive prompt (asks for source, then destination):
 convert-docs
 ```
 
+Tip (macOS): select a folder in Finder and press `Option+Command+C` to copy its full
+path, then paste it into the prompt.
+
 Or pass flags to skip the prompts:
 
 ```bash
