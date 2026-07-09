@@ -24,7 +24,44 @@ EXCLUDED_DIR_NAMES = {
     ".idea", ".vscode", ".cache",
 }
 
-EXCLUDED_FILE_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+EXCLUDED_FILE_NAMES = {
+    ".DS_Store", "Thumbs.db", "desktop.ini",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Cargo.lock", "composer.lock", "Gemfile.lock", "poetry.lock",
+}
+
+# Extensions that are never documents, regardless of DEFAULT_EXTENSIONS or a
+# user-supplied -e/--ext list: source code, build/config, binaries, archives,
+# media, fonts, and design files. These are skipped during the scan entirely
+# (never counted as "convertible" or "unsupported"), the same way noise
+# directories like node_modules/.git are.
+NON_DOCUMENT_EXTENSIONS = {
+    # source code
+    "py", "pyc", "pyo", "pyw", "ipynb",
+    "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte",
+    "java", "class", "jar", "kt", "kts", "scala", "groovy", "gradle",
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+    "cs", "go", "rb", "php", "swift", "rs", "pl", "pm", "lua", "r", "dart",
+    "sh", "bash", "zsh", "ps1", "bat", "cmd", "sql",
+    # build / config (not documents, even though they're plain text)
+    "yml", "yaml", "toml", "ini", "cfg", "conf", "env",
+    "lock", "editorconfig", "npmrc", "gitignore", "gitattributes",
+    # compiled / executable binaries
+    "exe", "dll", "so", "dylib", "bin", "o", "obj", "a", "lib",
+    "node", "wasm", "apk", "app", "deb", "rpm", "msi", "dmg",
+    # archives
+    "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "iso",
+    # images
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico", "tiff", "tif", "heic",
+    # audio / video
+    "mp3", "wav", "flac", "aac", "m4a", "ogg", "mp4", "mov", "avi", "mkv", "webm", "flv", "wmv",
+    # fonts
+    "ttf", "otf", "woff", "woff2", "eot",
+    # design files
+    "psd", "ai", "sketch", "fig", "xd", "indd",
+    # databases
+    "db", "sqlite", "sqlite3",
+}
 
 SEPARATOR = "-" * 40
 
@@ -34,7 +71,12 @@ _ANSI_DIM = "\033[2m"
 _ANSI_CYAN = "\033[36m"
 _ANSI_GREEN = "\033[32m"
 _ANSI_RED = "\033[31m"
+_ANSI_YELLOW = "\033[33m"
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+ICON_OK = "✓"
+ICON_FAIL = "✗"
+ICON_WARN = "⚠"
 
 _color_enabled = False
 
@@ -67,8 +109,16 @@ def style_fail(text) -> str:
     return _style(text, _ANSI_BOLD, _ANSI_RED)
 
 
+def style_warn(text) -> str:
+    return _style(text, _ANSI_BOLD, _ANSI_YELLOW)
+
+
 def style_hint(text) -> str:
     return _style(text, _ANSI_DIM)
+
+
+def style_count(n: int, style_fn) -> str:
+    return style_fn(n) if n else style_hint(str(n))
 
 
 def get_version() -> str:
@@ -167,9 +217,9 @@ def prompt_source() -> tuple:
         print(f"  '{path_part}' is not a valid file or directory. Try again.", file=sys.stderr)
 
 
-def prompt_destination(default: Path) -> Path:
+def prompt_destination(default: Path, description: str) -> Path:
     print("Destination folder path:")
-    print(f"  default: {style_path(default)}")
+    print(f"  default: {description}")
     raw = strip_quotes(input(style_hint("[Enter = default] > ")).strip())
     if not raw:
         return default
@@ -178,7 +228,7 @@ def prompt_destination(default: Path) -> Path:
 
 def prompt_destination_file(default: Path) -> Path:
     print("Destination file path:")
-    print(f"  default: {style_path(default)}")
+    print(f"  default: {style_path(default.name)} (same folder as the source file)")
     raw = strip_quotes(input(style_hint("[Enter = default] > ")).strip())
     if not raw:
         return default
@@ -256,6 +306,17 @@ def resolve_source(args: argparse.Namespace) -> tuple:
     sys.exit(1)
 
 
+def default_destination_dir(src: Path) -> tuple:
+    """Default output directory for directory mode: normally a "Context"
+    subfolder inside the source. If the source is itself already named
+    "Context", nesting would look like a mistake (Context/Context), so fall
+    back to a sibling folder instead."""
+    if src.name.lower() == "context":
+        name = f"{src.name}-md"
+        return src.parent / name, f'a sibling folder named "{name}"'
+    return src / "Context", 'a "Context" subfolder inside the source folder'
+
+
 def resolve_destination(args: argparse.Namespace, src: Path, is_file: bool, custom_name: str) -> Path:
     if is_file:
         default_name = (custom_name or src.stem) + ".md"
@@ -267,9 +328,9 @@ def resolve_destination(args: argparse.Namespace, src: Path, is_file: bool, cust
             return out / default_name
         return out.with_suffix(".md")
 
-    default = src / "Context"
+    default, description = default_destination_dir(src)
     if not args.output:
-        return prompt_destination(default)
+        return prompt_destination(default, description)
     return Path(args.output).expanduser().resolve()
 
 
@@ -287,6 +348,8 @@ def collect_files(src_dir: Path, dest_dir: Path, ext_set: set) -> tuple:
                 continue
             path = dirpath / filename
             suffix = path.suffix.lower().lstrip(".")
+            if suffix in NON_DOCUMENT_EXTENSIONS:
+                continue
             (target_files if suffix in ext_set else other_files).append(path)
     return target_files, other_files
 
@@ -352,10 +415,10 @@ def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
             try:
                 result = md.convert(str(path))
                 out_path.write_text(result.text_content, encoding="utf-8")
-                print(style_ok("OK"))
+                print(style_ok(f"{ICON_OK} OK"))
                 converted.append(str(rel_path))
             except Exception as exc:
-                print(style_fail("FAILED"))
+                print(style_fail(f"{ICON_FAIL} FAILED"))
                 failed.append(f"{rel_path} :: {exc}")
         return converted, failed
 
@@ -369,10 +432,10 @@ def execute_conversions(to_convert: list, jobs: int = 1) -> tuple:
                 rel_path = futures[future]
                 succeeded, err = future.result()
                 if succeeded:
-                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_ok('OK')}")
+                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_ok(f'{ICON_OK} OK')}")
                     converted.append(str(rel_path))
                 else:
-                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_fail('FAILED')}")
+                    print(f"[{i}/{total}] {style_path(rel_path)} ... {style_fail(f'{ICON_FAIL} FAILED')}")
                     failed.append(f"{rel_path} :: {err}")
         except KeyboardInterrupt:
             print("\nInterrupted, cancelling remaining conversions...", file=sys.stderr)
@@ -480,13 +543,13 @@ def _run_single_file(args: argparse.Namespace, src_path: Path, dest_path: Path) 
         result = MarkItDown().convert(str(src_path))
         dest_path.write_text(result.text_content, encoding="utf-8")
     except Exception as exc:
-        print(style_fail("FAILED"))
+        print(style_fail(f"{ICON_FAIL} FAILED"))
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(style_ok("OK"))
+    print(style_ok(f"{ICON_OK} OK"))
     print(SEPARATOR)
-    print(f"Done. Output written to: {style_path(dest_path)}")
+    print(f"{style_ok(ICON_OK)} Done. Output written to: {style_path(dest_path)}")
     return 0
 
 
@@ -506,15 +569,18 @@ def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, exte
 
     target_files, other_files = collect_files(src_dir, dest_dir, set(extensions))
     to_convert, skipped, collisions = plan_conversions(target_files, src_dir, dest_dir, args.force)
-    print(f"Found {len(target_files)} convertible file(s), {len(other_files)} file(s) with unsupported extensions.")
-    print(SEPARATOR)
+    print(
+        f"Found {style_count(len(target_files), style_ok)} convertible file(s), "
+        f"{style_count(len(other_files), style_warn)} file(s) with unsupported extensions."
+    )
+    print()
 
     if args.dry_run:
         print("Dry run - no files were written.")
         print(f"  Would convert:          {len(to_convert)}")
         print(f"  Already up to date:     {len(skipped)}")
-        print(f"  Name collisions:        {len(collisions)}")
-        print(f"  Unsupported extension:  {len(other_files)}")
+        print(f"  Name collisions:        {style_count(len(collisions), style_warn)}")
+        print(f"  Unsupported extension:  {style_count(len(other_files), style_warn)}")
         _print_collisions(collisions, dest_dir, src_dir)
         _print_unsupported(other_files, src_dir)
         return 1 if collisions else 0
@@ -527,15 +593,15 @@ def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, exte
 
     print(SEPARATOR)
     print("Summary:")
-    print(f"  Converted:              {len(converted)}")
+    print(f"  Converted:              {style_count(len(converted), style_ok)}")
     print(f"  Skipped (up to date):   {len(skipped)}")
-    print(f"  Failed:                 {len(failed)}")
-    print(f"  Name collisions:        {len(collisions)}")
-    print(f"  Unsupported extension:  {len(other_files)}")
+    print(f"  Failed:                 {style_count(len(failed), style_fail)}")
+    print(f"  Name collisions:        {style_count(len(collisions), style_warn)}")
+    print(f"  Unsupported extension:  {style_count(len(other_files), style_warn)}")
 
     if failed:
         print()
-        print("Failed conversions:")
+        print(f"{style_fail(ICON_FAIL)} Failed conversions:")
         for item in failed:
             rel_path, _, err = item.partition(" :: ")
             print(f"  - {style_path(rel_path)} :: {err}")
@@ -544,7 +610,18 @@ def _run_directory(args: argparse.Namespace, src_dir: Path, dest_dir: Path, exte
     _print_unsupported(other_files, src_dir)
 
     print(SEPARATOR)
-    print(f"Done. Output mirrored under: {style_path(dest_dir)}")
+    if failed or collisions:
+        print(
+            f"{style_fail(ICON_FAIL + ' Finished with errors.')} "
+            f"Output mirrored under: {style_path(dest_dir)}"
+        )
+    elif not converted and not skipped:
+        print(
+            f"{style_warn(ICON_WARN + ' Nothing converted.')} "
+            f"Output mirrored under: {style_path(dest_dir)}"
+        )
+    else:
+        print(f"{style_ok(ICON_OK)} Done. Output mirrored under: {style_path(dest_dir)}")
     return 1 if (failed or collisions) else 0
 
 
@@ -552,7 +629,7 @@ def _print_collisions(collisions: list, dest_dir: Path, src_dir: Path) -> None:
     if not collisions:
         return
     print()
-    print("Name collisions (same output path, not converted):")
+    print(f"{style_warn(ICON_WARN)} Name collisions (same output path, not converted):")
     for rel_path, existing_rel_path in collisions:
         out_name = (dest_dir / rel_path).with_suffix(".md").relative_to(dest_dir)
         print(
@@ -565,7 +642,7 @@ def _print_unsupported(other_files: list, src_dir: Path) -> None:
     if not other_files:
         return
     print()
-    print("Unsupported / not attempted:")
+    print(f"{style_warn(ICON_WARN)} Unsupported / not attempted:")
     for file_path in other_files:
         print(f"  - {style_path(file_path.relative_to(src_dir))}")
 

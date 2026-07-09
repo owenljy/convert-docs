@@ -69,7 +69,7 @@ def test_collect_files_excludes_noise_and_dest(tmp_path):
 
     (src / "report.pdf").write_text("x")
     (src / "sub" / "notes.txt").write_text("x")
-    (src / "image.png").write_text("x")
+    (src / "notes.rtf").write_text("x")
     (src / ".git" / "config").write_text("x")
     (src / "node_modules" / "pkg" / "index.js").write_text("x")
     (src / ".DS_Store").write_text("x")
@@ -81,7 +81,40 @@ def test_collect_files_excludes_noise_and_dest(tmp_path):
     other_names = {p.relative_to(src) for p in other_files}
 
     assert target_names == {cli.Path("report.pdf"), cli.Path("sub/notes.txt")}
-    assert other_names == {cli.Path("image.png")}
+    assert other_names == {cli.Path("notes.rtf")}
+
+
+def test_collect_files_hides_non_document_extensions_entirely(tmp_path):
+    """Code, config, binary, media, etc. are skipped outright -- never
+    counted as convertible OR unsupported, unlike a genuinely undocumented
+    extension such as .rtf."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "report.pdf").write_text("x")
+    (src / "app.py").write_text("x")
+    (src / "Button.tsx").write_text("x")
+    (src / "image.png").write_text("x")
+    (src / "archive.zip").write_text("x")
+    (src / "config.yaml").write_text("x")
+
+    target_files, other_files = cli.collect_files(src, src / "Context", {"pdf"})
+
+    assert {p.relative_to(src) for p in target_files} == {cli.Path("report.pdf")}
+    assert other_files == []
+
+
+def test_collect_files_denylist_overrides_explicit_ext_set(tmp_path):
+    """Even if a code extension is explicitly requested via -e, it's still
+    treated as a non-document and skipped."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("x")
+    (src / "report.pdf").write_text("x")
+
+    target_files, other_files = cli.collect_files(src, src / "Context", {"pdf", "py"})
+
+    assert {p.relative_to(src) for p in target_files} == {cli.Path("report.pdf")}
+    assert other_files == []
 
 
 # --- plan_conversions ---------------------------------------------------------
